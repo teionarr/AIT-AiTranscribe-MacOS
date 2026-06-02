@@ -14,6 +14,51 @@ A powerful macOS menu bar application for local speech-to-text transcription and
 
 ---
 
+## This fork — System Audio → Transcript + AI Summary
+
+> A focused fork of [AITranscribe](https://github.com/Ljove02/AIT-AiTranscribe-MacOS)
+> by **Ljove02** (MIT, see [LICENSE](LICENSE)). It captures **system audio only**
+> (what you hear — no microphone), transcribes **locally** with whisper.cpp
+> (Whisper large-v3, Metal GPU), and writes two files per session into a folder
+> you choose, then summarizes the transcript with the **Google Gemini API**.
+
+**What's different from upstream:**
+- **System audio only** — the menu-bar "Listen" flow never records the microphone.
+- **Two files per session**, written to a folder you pick:
+  - `<timestamp>_transcript.txt` — plain transcript
+  - `<timestamp>_summary.md` — a Gemini **Summary** + **Top Insights**, written in
+    the transcript's dominant language (the transcript may mix Russian/English)
+- **Menu**: **Start Listening / Finish Listening** (finishing auto-transcribes and
+  summarizes), **Choose Save Folder…**, **Show Saved Files**.
+
+### Gemini API key (summary only)
+Transcription is 100% local — only the **text** transcript is sent to Gemini.
+**Audio never leaves your Mac.**
+1. Get a key at https://aistudio.google.com/apikey
+2. Menu → Settings → General → **Summary (Gemini)** → paste the key → **Save**.
+   The key is stored in the **macOS Keychain** — never written to disk or committed.
+3. No key set? The summary is skipped gracefully — you still get the transcript.
+
+The model is set by the `model` constant in
+`AiTranscribe/AiTranscribe/GeminiSummarizer.swift` (`gemini-2.5-flash`).
+
+### One-time permission
+On first **Start Listening**, macOS asks for **Screen & System Audio Recording**
+(required by ScreenCaptureKit, even for audio-only). Approve it in
+**System Settings → Privacy & Security → Screen & System Audio Recording**; you may
+need to relaunch the app once after the first grant.
+
+### Privacy
+Audio is captured and transcribed entirely on-device (whisper.cpp). The only data
+that leaves your Mac is the text transcript, sent to Gemini solely to generate the
+summary — and only if you've set a key.
+
+### Credits
+Forked from **AITranscribe** © 2025 Ljove02 (MIT License, retained). Built on
+whisper.cpp (MIT). Summaries via Google Gemini.
+
+---
+
 ## Quick Install
 
 1. Download the latest **DMG** from [Releases](https://github.com/Ljove02/AIT-AiTranscribe-MacOS/releases)

@@ -282,15 +282,13 @@ class HotkeyManager {
 
     /// Handle start session recording hotkey
     private func handleToggleSession() {
-        guard let appState = appState, let sessionManager = sessionManager else { return }
+        guard let sessionManager = sessionManager else { return }
 
         Task { @MainActor in
             if sessionManager.isSessionRecording {
                 await sessionManager.stopSessionRecording()
             } else {
-                await sessionManager.startSessionRecording(
-                    micDeviceId: appState.selectedDeviceId
-                )
+                _ = await sessionManager.startSessionRecording()
             }
         }
     }

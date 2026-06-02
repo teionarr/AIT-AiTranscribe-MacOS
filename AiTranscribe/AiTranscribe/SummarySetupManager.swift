@@ -102,7 +102,7 @@ class SummarySetupManager: ObservableObject {
         return exists
     }
 
-    func findPython() -> PythonInstallationInfo? {
+    nonisolated func findPython() -> PythonInstallationInfo? {
         let pythonPaths = [
             "/Library/Frameworks/Python.framework/Versions/3.13/bin/python3",
             "/Library/Frameworks/Python.framework/Versions/3.12/bin/python3",
@@ -130,7 +130,7 @@ class SummarySetupManager: ObservableObject {
         return fallback
     }
 
-    private func getPythonInfo(_ pythonPath: String) -> PythonInstallationInfo? {
+    nonisolated private func getPythonInfo(_ pythonPath: String) -> PythonInstallationInfo? {
         let process = Process()
         process.executableURL = URL(fileURLWithPath: pythonPath)
         process.arguments = [
@@ -168,7 +168,7 @@ class SummarySetupManager: ObservableObject {
         return nil
     }
 
-    private func isPythonVersionOk(_ version: String) -> Bool {
+    nonisolated private func isPythonVersionOk(_ version: String) -> Bool {
         let components = version.split(separator: ".").compactMap { Int($0) }
         guard components.count >= 2 else { return false }
         return components[0] == 3 && components[1] >= 10

@@ -8,7 +8,6 @@
  */
 
 import SwiftUI
-import CoreAudio
 
 struct MenuBarView: View {
     @EnvironmentObject var appState: AppState
@@ -33,12 +32,6 @@ struct MenuBarView: View {
             // ── Main Controls ──
             controlsSection
                 .padding(.top, 10)
-
-            // ── Microphone (only when backend is connected) ──
-            if appState.isServerConnected {
-                microphoneRow
-                    .padding(.top, 8)
-            }
 
             // ── Footer ──
             footerBar
@@ -108,6 +101,10 @@ struct MenuBarView: View {
 
     private var controlsSection: some View {
         VStack(spacing: 6) {
+            if let notice = sessionManager.recordingNotice, !sessionManager.isSessionRecording {
+                recordingNoticeBanner(notice)
+            }
+
             if appState.isRecording {
                 recordingActiveControls
             } else if isTranscribing {
@@ -118,6 +115,26 @@ struct MenuBarView: View {
                 idleControls
             }
         }
+    }
+
+    private func recordingNoticeBanner(_ text: String) -> some View {
+        HStack(alignment: .top, spacing: 6) {
+            Image(systemName: "exclamationmark.triangle.fill")
+                .font(.system(size: 11))
+                .foregroundStyle(.yellow)
+            Text(text)
+                .font(.system(size: 10, weight: .medium))
+                .foregroundStyle(.primary)
+                .fixedSize(horizontal: false, vertical: true)
+            Spacer(minLength: 0)
+        }
+        .padding(.horizontal, 10)
+        .padding(.vertical, 6)
+        .background(.yellow.opacity(0.10), in: .rect(cornerRadius: 8, style: .continuous))
+        .overlay(
+            RoundedRectangle(cornerRadius: 8, style: .continuous)
+                .strokeBorder(.yellow.opacity(0.25), lineWidth: 0.5)
+        )
     }
 
     private var recordingActiveControls: some View {
@@ -179,7 +196,7 @@ struct MenuBarView: View {
                     .frame(width: 6, height: 6)
                     .shadow(color: .orange.opacity(0.5), radius: 4)
 
-                Text("Session Recording")
+                Text("Listening…")
                     .font(.system(size: 11, weight: .medium))
                     .foregroundStyle(.primary)
 
@@ -194,7 +211,7 @@ struct MenuBarView: View {
             )
 
             MenuBarButton(
-                label: "Stop Session",
+                label: "Finish Listening",
                 icon: "stop.circle.fill",
                 style: .prominent,
                 tint: .orange
@@ -227,56 +244,53 @@ struct MenuBarView: View {
     private var idleControls: some View {
         VStack(spacing: 6) {
             MenuBarButton(
-                label: "Start Recording",
-                icon: "mic.fill",
+                label: "Start Listening",
+                icon: "waveform",
                 style: .prominent
             ) {
-                Task { await appState.startRecording() }
+                Task { _ = await sessionManager.startSessionRecording() }
             }
             .disabled(!appState.isServerConnected)
 
             MenuBarButton(
-                label: "Record Session",
-                icon: "waveform.badge.plus",
+                label: "Choose Save Folder…",
+                icon: "folder.badge.gearshape",
                 style: .regular
             ) {
-                Task {
-                    await sessionManager.startSessionRecording(
-                        micDeviceId: appState.selectedDeviceId
-                    )
-                }
+                chooseSaveFolder()
             }
-            .disabled(!appState.isServerConnected)
+
+            MenuBarButton(
+                label: "Show Saved Files",
+                icon: "folder",
+                style: .regular
+            ) {
+                showSavedFiles()
+            }
         }
     }
 
-    // MARK: - Microphone Row
+    // MARK: - Save Folder Actions
 
-    private var microphoneRow: some View {
-        HStack(spacing: 6) {
-            Image(systemName: "mic")
-                .font(.system(size: 9, weight: .medium))
-                .foregroundStyle(.secondary)
-
-            Picker(selection: $appState.selectedDeviceId) {
-                ForEach(appState.audioDevices) { device in
-                    Text(device.displayName)
-                        .tag(device.id as AudioDeviceID?)
-                }
-            } label: {
-                EmptyView()
-            }
-            .pickerStyle(.menu)
-            .labelsHidden()
-            .controlSize(.small)
+    /// Present a directory picker and persist the chosen save folder.
+    private func chooseSaveFolder() {
+        let panel = NSOpenPanel()
+        panel.canChooseDirectories = true
+        panel.canChooseFiles = false
+        panel.allowsMultipleSelection = false
+        panel.prompt = "Choose"
+        panel.message = "Choose a folder to save transcripts and summaries"
+        panel.directoryURL = SaveFolder.url
+        NSApp.activate(ignoringOtherApps: true)
+        if panel.runModal() == .OK, let url = panel.url {
+            SaveFolder.set(url)
         }
-        .padding(.horizontal, 10)
-        .padding(.vertical, 5)
-        .background(.white.opacity(0.04), in: .rect(cornerRadius: 8, style: .continuous))
-        .overlay(
-            RoundedRectangle(cornerRadius: 8, style: .continuous)
-                .strokeBorder(.white.opacity(0.06), lineWidth: 0.5)
-        )
+    }
+
+    /// Open the current save folder in Finder (showing its contents), creating it if needed.
+    private func showSavedFiles() {
+        guard let dir = SaveFolder.ensureExists() else { return }
+        NSWorkspace.shared.open(dir)
     }
 
     // MARK: - Footer Bar

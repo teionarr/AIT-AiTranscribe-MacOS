@@ -152,7 +152,7 @@ class NemoSetupManager: ObservableObject {
     // MARK: - Python Detection
 
     /// Find Python 3 installation on the system
-    func findPython() -> (path: String, version: String)? {
+    nonisolated func findPython() -> (path: String, version: String)? {
         // Check common Python paths in order of preference
         let pythonPaths = [
             "/Library/Frameworks/Python.framework/Versions/3.12/bin/python3",
@@ -177,7 +177,7 @@ class NemoSetupManager: ObservableObject {
     }
 
     /// Get Python version from a Python executable
-    private func getPythonVersion(_ pythonPath: String) -> String? {
+    nonisolated private func getPythonVersion(_ pythonPath: String) -> String? {
         let process = Process()
         process.executableURL = URL(fileURLWithPath: pythonPath)
         process.arguments = ["--version"]

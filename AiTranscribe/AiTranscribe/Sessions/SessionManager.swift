@@ -534,6 +534,10 @@ class SessionManager: ObservableObject {
     /// Whether a session is currently being recorded
     @Published var isSessionRecording: Bool = false
 
+    /// Transient message for the menu bar (e.g. missing permission, silent capture).
+    /// Set when a recording can't start or finished with no usable audio.
+    @Published var recordingNotice: String? = nil
+
     /// Duration of the current recording in seconds
     @Published var sessionDuration: TimeInterval = 0
 
@@ -829,9 +833,9 @@ class SessionManager: ObservableObject {
 
     // MARK: - Session Recording
 
-    /// Start a new session recording.
-    /// Creates a session, starts mic + system audio capture, and begins writing to M4A.
-    func startSessionRecording(micDeviceId: AudioDeviceID? = nil) async -> Bool {
+    /// Start a new session recording (system audio only).
+    /// Creates a session, starts system audio capture, and begins writing to M4A.
+    func startSessionRecording() async -> Bool {
         guard !isSessionRecording else {
             print("SessionManager: Already recording a session")
             return false
@@ -847,10 +851,13 @@ class SessionManager: ObservableObject {
         let session = createSession()
         let sessionDir = getSessionDirectory(for: session)
 
-        // Start the recorder
-        let started = await recorder.startRecording(sessionDir: sessionDir, micDeviceId: micDeviceId)
+        // Start the recorder (system audio only)
+        let result = await recorder.startRecording(sessionDir: sessionDir)
 
-        if started {
+        switch result {
+        case .started:
+            recordingNotice = nil
+            SoundManager.shared.playStartSound()
             currentRecordingSessionId = session.id
             isSessionRecording = true
             appState?.isSessionRecordingActive = true
@@ -872,13 +879,20 @@ class SessionManager: ObservableObject {
             indicatorController.show()
 
             print("SessionManager: Session recording started — '\(session.name)'")
-        } else {
-            // Recording failed — clean up the session
-            deleteSession(id: session.id)
-            print("SessionManager: Failed to start session recording")
-        }
+            return true
 
-        return started
+        case .needsSystemAudioPermission:
+            deleteSession(id: session.id)
+            recordingNotice = "Allow “System Audio Recording” for AiTranscribe in System Settings → Privacy & Security, then start again."
+            print("SessionManager: System audio permission required")
+            return false
+
+        case .failed:
+            deleteSession(id: session.id)
+            recordingNotice = "Couldn't start system-audio capture. Please try again."
+            print("SessionManager: Failed to start session recording")
+            return false
+        }
     }
 
     /// Stop the current session recording.
@@ -886,10 +900,15 @@ class SessionManager: ObservableObject {
     func stopSessionRecording() async {
         guard isSessionRecording, let sessionId = currentRecordingSessionId else { return }
 
+        SoundManager.shared.playStopSound()
+
         // Transition indicator to processing state while mixing/converting audio
         indicatorController.showProcessing()
 
         let audioURL = await recorder.stopRecording()
+
+        // Surface a silence/permission warning if the capture produced no usable audio.
+        recordingNotice = recorder.lastSilenceWarning
 
         // Hide the indicator now that conversion is complete
         indicatorController.hide()
@@ -916,6 +935,81 @@ class SessionManager: ObservableObject {
         currentRecordingSessionId = nil
         sessionDuration = 0
         appState?.isSessionRecordingActive = false
+
+        // Auto-transcribe the finished session (transcript + Gemini summary are
+        // written when transcription completes — see handleTranscriptionEvent).
+        if audioURL != nil && recorder.lastSilenceWarning == nil {
+            await autoProcessFinishedSession(sessionId)
+        }
+    }
+
+    /// Kick off transcription automatically after "Finish Listening".
+    /// Ensures the Whisper model is loaded, then starts the batch transcription.
+    private func autoProcessFinishedSession(_ sessionId: UUID) async {
+        guard let appState else { return }
+
+        let preferred = UserDefaults.standard.string(forKey: "preferredModelId")
+        let modelId = appState.loadedModelId ?? preferred ?? "whisper-large-v3"
+
+        if !appState.isModelLoaded || appState.loadedModelId != modelId {
+            await appState.loadModel(modelId: modelId)
+        }
+
+        guard appState.isModelLoaded, let loaded = appState.loadedModelId else {
+            recordingNotice = "Couldn't load the transcription model. Open Sessions to transcribe manually."
+            return
+        }
+
+        startTranscription(
+            sessionId: sessionId,
+            modelId: loaded,
+            ramBudgetMB: 4096,
+            apiClient: appState.apiClient
+        )
+    }
+
+    /// Write <timestamp>_transcript.txt and (if a Gemini key is set)
+    /// <timestamp>_summary.md into the user's chosen save folder.
+    /// <timestamp> is the session start time.
+    private func writeSessionOutputs(session: Session, transcript: String) async {
+        let trimmed = transcript.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else {
+            recordingNotice = "Transcript was empty — nothing to save."
+            return
+        }
+        guard let dir = SaveFolder.ensureExists() else {
+            recordingNotice = "Couldn't access the save folder."
+            return
+        }
+
+        let stamp = Self.outputTimestamp(from: session.createdAt)
+        let transcriptURL = dir.appendingPathComponent("\(stamp)_transcript.txt")
+        do {
+            try trimmed.write(to: transcriptURL, atomically: true, encoding: .utf8)
+        } catch {
+            recordingNotice = "Couldn't write the transcript file: \(error.localizedDescription)"
+            return
+        }
+
+        // Summary via Gemini (text only; audio never leaves the Mac).
+        guard GeminiSummarizer.hasAPIKey else {
+            recordingNotice = "Transcript saved. Summary skipped — add a Gemini API key in Settings."
+            return
+        }
+        do {
+            let summary = try await GeminiSummarizer.summarize(transcript: trimmed)
+            let summaryURL = dir.appendingPathComponent("\(stamp)_summary.md")
+            try summary.write(to: summaryURL, atomically: true, encoding: .utf8)
+            recordingNotice = "Saved transcript + summary to your folder."
+        } catch {
+            recordingNotice = "Transcript saved. Summary failed: \(error.localizedDescription)"
+        }
+    }
+
+    private static func outputTimestamp(from date: Date) -> String {
+        let formatter = DateFormatter()
+        formatter.dateFormat = "yyyy-MM-dd_HHmmss"
+        return formatter.string(from: date)
     }
 
     // MARK: - Session Rename
@@ -1109,6 +1203,11 @@ class SessionManager: ObservableObject {
             currentTranscribingSessionId = nil
             transcriptionProgress = nil
             print("SessionManager: Transcription complete — \(event.wordCount ?? 0) words")
+
+            // Write the transcript + Gemini summary into the chosen save folder.
+            let finishedSession = sessions[index]
+            let transcriptText = event.fullText ?? finishedSession.transcriptionText ?? ""
+            Task { await writeSessionOutputs(session: finishedSession, transcript: transcriptText) }
 
         case "error":
             sessions[index].status = .failed(event.message ?? "Unknown error")

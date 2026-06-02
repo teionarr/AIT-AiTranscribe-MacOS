@@ -246,9 +246,13 @@ class BackendManager: ObservableObject {
             return bundledPath
         }
 
-        // 2. Check if AITRANSCRIBE_BACKEND_PATH environment variable is set
-        if let envPath = ProcessInfo.processInfo.environment["AITRANSCRIBE_BACKEND_PATH"] {
-            let serverPath = (envPath as NSString).appendingPathComponent("server.py")
+        // 2. Check if AITRANSCRIBE_BACKEND_PATH environment variable is set,
+        //    or a persisted "devBackendPath" (so a plain icon/Xcode launch works
+        //    in development without env vars).
+        let backendDirOverride = ProcessInfo.processInfo.environment["AITRANSCRIBE_BACKEND_PATH"]
+            ?? UserDefaults.standard.string(forKey: "devBackendPath")
+        if let backendDir = backendDirOverride {
+            let serverPath = (backendDir as NSString).appendingPathComponent("server.py")
             if FileManager.default.fileExists(atPath: serverPath) {
                 return serverPath
             }
@@ -277,6 +281,18 @@ class BackendManager: ObservableObject {
 
     /// Find Python executable (prioritize Python with ML dependencies installed)
     private func findPythonPath() -> String {
+        // Explicit override for development with a project venv —
+        // env var first, then a persisted "devPythonPath" so a plain
+        // icon/Xcode launch also uses the venv (no env vars needed).
+        if let envPython = ProcessInfo.processInfo.environment["AITRANSCRIBE_PYTHON"],
+           FileManager.default.fileExists(atPath: envPython) {
+            return envPython
+        }
+        if let devPython = UserDefaults.standard.string(forKey: "devPythonPath"),
+           FileManager.default.fileExists(atPath: devPython) {
+            return devPython
+        }
+
         // Try Python paths in order of preference
         // Python.framework versions are more likely to have ML packages installed
         let possiblePaths = [

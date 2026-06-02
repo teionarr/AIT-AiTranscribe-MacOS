@@ -15,6 +15,10 @@ struct GeneralSettingsView: View {
     // Init from hasAnimated so the very first frame is correct — no jump
     @State private var appeared: Bool
 
+    // Gemini API key (persisted in Keychain, not UserDefaults)
+    @State private var geminiKey: String = KeychainStore.get(GeminiSummarizer.apiKeyAccount) ?? ""
+    @State private var geminiKeySaved: Bool = GeminiSummarizer.hasAPIKey
+
     init(hasAnimated: Bool, onAnimated: @escaping () -> Void) {
         self.hasAnimated = hasAnimated
         self.onAnimated = onAnimated
@@ -30,7 +34,7 @@ struct GeneralSettingsView: View {
                         Text("General")
                             .font(.system(size: 22, weight: .bold, design: .rounded))
 
-                        Text("5 options")
+                        Text("6 options")
                             .font(.system(size: 11))
                             .foregroundStyle(.secondary)
                     }
@@ -57,6 +61,45 @@ struct GeneralSettingsView: View {
                     }
                 }
                 .staggerIn(index: 1, appeared: appeared)
+
+                SettingsDivider()
+                    .staggerIn(index: 2, appeared: appeared)
+
+                // Summary (Gemini) section
+                Group {
+                    SettingsSectionHeader(title: "Summary (Gemini)")
+
+                    SettingsRow(
+                        title: "Gemini API Key",
+                        description: "Used only to summarize the transcript text. Stored in your macOS Keychain — never written to disk. Audio never leaves your Mac."
+                    ) {
+                        HStack(spacing: 6) {
+                            SecureField("Paste key", text: $geminiKey)
+                                .textFieldStyle(.roundedBorder)
+                                .frame(width: 170)
+                                .onSubmit { saveGeminiKey() }
+                            Button("Save") { saveGeminiKey() }
+                                .controlSize(.small)
+                        }
+                    }
+
+                    SettingsRow(
+                        title: "Status",
+                        description: geminiKeySaved
+                            ? "A Gemini API key is set — summaries are enabled."
+                            : "No key set — summaries are skipped (the transcript is still saved)."
+                    ) {
+                        HStack(spacing: 5) {
+                            Circle()
+                                .fill(geminiKeySaved ? .green : .secondary)
+                                .frame(width: 8, height: 8)
+                            Text(geminiKeySaved ? "Enabled" : "Off")
+                                .font(.system(size: 12, weight: .medium))
+                                .foregroundStyle(geminiKeySaved ? .green : .secondary)
+                        }
+                    }
+                }
+                .staggerIn(index: 2, appeared: appeared)
 
                 SettingsDivider()
                     .staggerIn(index: 2, appeared: appeared)
@@ -166,6 +209,14 @@ struct GeneralSettingsView: View {
             appeared = true
             onAnimated()
         }
+    }
+
+    // MARK: - Gemini API Key
+
+    private func saveGeminiKey() {
+        KeychainStore.set(geminiKey, for: GeminiSummarizer.apiKeyAccount)
+        geminiKeySaved = GeminiSummarizer.hasAPIKey
+        appState.statusMessage = geminiKeySaved ? "Gemini API key saved" : "Gemini API key cleared"
     }
 
     // MARK: - Microphone Permission

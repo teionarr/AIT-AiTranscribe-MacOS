@@ -375,6 +375,17 @@ class SessionRecorder: NSObject, ObservableObject {
     @Published var hasSystemAudio = false
     @Published var isConverting = false
 
+    /// Set after stopRecording() when the captured system audio was empty/silent,
+    /// so the UI can warn instead of silently producing an empty transcript.
+    @Published var lastSilenceWarning: String?
+
+    /// Result of attempting to start a (system-audio-only) recording.
+    enum StartResult: Equatable {
+        case started
+        case needsSystemAudioPermission
+        case failed
+    }
+
     // MARK: - Private Properties
 
     private let systemCapture = SystemAudioCapture()
@@ -405,6 +416,7 @@ class SessionRecorder: NSObject, ObservableObject {
     private var micFramesWritten: Int64 = 0
     private var micFileCreated = false
     private var sysFramesWritten: Int64 = 0
+    private var sysMaxPeak: Float = 0
     private var micCallbackCount: Int64 = 0
     private var micActiveBuffers: Int64 = 0
     private var micMaxRMS: Float = 0
@@ -442,82 +454,42 @@ class SessionRecorder: NSObject, ObservableObject {
 
     // MARK: - Recording Control
 
-    func startRecording(sessionDir: URL, micDeviceId: AudioDeviceID? = nil) async -> Bool {
-        guard !isRecording else { return false }
+    /// Start a system-audio-only recording. Microphone is never captured.
+    func startRecording(sessionDir: URL) async -> StartResult {
+        guard !isRecording else { return .failed }
 
-        // Check microphone permission BEFORE creating capture session.
-        let micPermission = AVCaptureDevice.authorizationStatus(for: .audio)
-        switch micPermission {
-        case .notDetermined:
-            let granted = await AVCaptureDevice.requestAccess(for: .audio)
-            if !granted {
-                print("SessionRecorder: Microphone permission denied by user")
-                return false
-            }
-        case .denied, .restricted:
-            print("SessionRecorder: Microphone permission not granted (status: \(micPermission.rawValue))")
-            return false
-        case .authorized:
-            break
-        @unknown default:
-            break
+        // System audio requires the "Screen & System Audio Recording" permission.
+        // Check it up front so we can ask the UI to guide the user instead of
+        // recording silence. ScreenCaptureKit can hard-crash on unsigned/
+        // quarantined apps if started without permission, so this gate matters.
+        guard SystemAudioCapture.preflightPermission() else {
+            print("SessionRecorder: System audio recording permission not granted")
+            SystemAudioCapture.requestPermission()
+            return .needsSystemAudioPermission
         }
 
         let m4aURL = sessionDir.appendingPathComponent("audio.m4a")
-        let micURL = sessionDir.appendingPathComponent("mic_temp.caf")
         let sysURL = sessionDir.appendingPathComponent("sys_temp.caf")
         outputURL = m4aURL
-        tempMicURL = micURL
+        tempMicURL = nil
         tempSysURL = sysURL
 
         // System audio file is created lazily from the first buffer's format
         sysFile = nil
         sysFileFormat = nil
         sysFramesWritten = 0
-        micCallbackCount = 0
-        micActiveBuffers = 0
-        micMaxRMS = 0
-        micMaxPeak = 0
-        micFormatSummary = nil
-        micCaptureSummary = nil
-        appliedMixMicGain = 1.0
-        appliedMixSystemGain = 1.0
-        analyzedMixMicRMS = 0
-        analyzedMixMicPeak = 0
-        analyzedMixSystemRMS = 0
-        analyzedMixSystemPeak = 0
-        sessionMicTrimDB = SessionAudioMixPreferences.micTrimDB()
+        sysMaxPeak = 0
+        lastSilenceWarning = nil
         sessionSystemTrimDB = SessionAudioMixPreferences.systemTrimDB()
-        sessionRecordedMicGain = SessionAudioMixPreferences.effectiveMicGain()
         sessionRecordedSystemGain = SessionAudioMixPreferences.effectiveSystemGain()
 
         // System audio capture via ScreenCaptureKit.
-        // Only attempt if Screen Recording permission is already granted.
-        // ScreenCaptureKit can hard-crash on unsigned/quarantined apps,
-        // so we check permission first and skip entirely if not granted.
-        var systemStarted = false
-        let hasScreenPermission = SystemAudioCapture.preflightPermission()
-        if hasScreenPermission {
-            systemStarted = await startSystemAudioCapture()
-        } else {
-            print("SessionRecorder: Screen Recording permission not granted — skipping system audio")
-        }
+        let systemStarted = await startSystemAudioCapture()
         hasSystemAudio = systemStarted
-
         if !systemStarted {
-            print("SessionRecorder: Recording mic-only")
+            print("SessionRecorder: Failed to start system audio capture")
             tempSysURL = nil
-        }
-
-        // Start microphone capture (creates micFile from the first PCM buffer)
-        micFramesWritten = 0
-        let micStarted = startMicrophoneCapture(sessionDir: sessionDir, deviceId: micDeviceId)
-        if !micStarted {
-            print("SessionRecorder: Failed to start microphone — aborting")
-            await systemCapture.stopCapture()
-            micFile = nil
-            sysFile = nil
-            return false
+            return .failed
         }
 
         // Duration timer — use .common mode so it fires even when menu bar is open
@@ -534,8 +506,8 @@ class SessionRecorder: NSObject, ObservableObject {
         durationTimer = timer
 
         isRecording = true
-        print("SessionRecorder: Recording started")
-        return true
+        print("SessionRecorder: Recording started (system audio only)")
+        return .started
     }
 
     func stopRecording() async -> URL? {
@@ -560,21 +532,32 @@ class SessionRecorder: NSObject, ObservableObject {
         }
         startTime = nil
 
-        // Mix and convert to M4A
-        guard let micURL = tempMicURL, let m4aURL = outputURL else { return nil }
+        // Convert system audio to M4A
+        guard let m4aURL = outputURL else { return nil }
+
+        // Self-check: if no system-audio buffers arrived, or every buffer was
+        // effectively silent, warn instead of producing an empty transcript.
+        // This usually means the System Audio Recording permission was revoked
+        // or nothing was playing during the session.
+        if sysFramesWritten == 0 {
+            lastSilenceWarning = "No system audio was captured — check that audio was playing and that System Audio Recording is enabled in System Settings → Privacy & Security."
+        } else if sysMaxPeak < 0.0005 {
+            lastSilenceWarning = "Captured system audio was silent — nothing was playing, or the audio route was muted."
+        } else {
+            lastSilenceWarning = nil
+        }
 
         isConverting = true
-        print("SessionRecorder: Finalizing audio (mic frames: \(micFramesWritten), system frames: \(sysFramesWritten))...")
+        print("SessionRecorder: Finalizing audio (system frames: \(sysFramesWritten), peak: \(sysMaxPeak))...")
 
-        let success = await exportRecordedAudio(micURL: micURL, sysURL: tempSysURL, outputURL: m4aURL)
+        let success = await exportRecordedAudio(micURL: nil, sysURL: tempSysURL, outputURL: m4aURL)
         isConverting = false
 
         if success {
             let outputSize = fileSize(at: m4aURL)
-            if micActiveBuffers == 0 || micMaxPeak < 0.001 || outputSize < 10_000 {
+            if sysFramesWritten == 0 || outputSize < 10_000 {
                 writeLowAudioDiagnostics(outputURL: m4aURL)
             }
-            try? FileManager.default.removeItem(at: micURL)
             if let sysURL = tempSysURL {
                 try? FileManager.default.removeItem(at: sysURL)
             }
@@ -582,7 +565,7 @@ class SessionRecorder: NSObject, ObservableObject {
             return m4aURL
         } else {
             removeExistingFile(at: m4aURL)
-            writeFailureDiagnostics(micURL: micURL, sysURL: tempSysURL)
+            writeFailureDiagnostics(micURL: nil, sysURL: tempSysURL)
             print("SessionRecorder: Conversion failed; preserved temp files for diagnostics")
             return nil
         }
@@ -669,6 +652,21 @@ class SessionRecorder: NSObject, ObservableObject {
             return
         }
         applyGain(sessionRecordedSystemGain, to: pcmBuffer)
+
+        // Cheap silence self-check: sample the peak so stopRecording() can warn
+        // if the whole session was silent (sampled, not every frame, to stay light).
+        if let ch = pcmBuffer.floatChannelData {
+            let n = Int(pcmBuffer.frameLength)
+            let step = max(1, n / 256)
+            var peak: Float = 0
+            var i = 0
+            while i < n {
+                let v = abs(ch[0][i])
+                if v > peak { peak = v }
+                i += step
+            }
+            if peak > sysMaxPeak { sysMaxPeak = peak }
+        }
 
         // Write directly — no lock needed, only this callback writes to sysFile
         guard let sysFile else { return }
@@ -846,15 +844,18 @@ class SessionRecorder: NSObject, ObservableObject {
         }
     }
 
-    private func exportRecordedAudio(micURL: URL, sysURL: URL?, outputURL: URL) async -> Bool {
+    private func exportRecordedAudio(micURL: URL?, sysURL: URL?, outputURL: URL) async -> Bool {
         let fileManager = FileManager.default
-        let hasMicAudio = micFramesWritten > 0 && fileManager.fileExists(atPath: micURL.path)
+        let hasMicAudio = {
+            guard let micURL else { return false }
+            return micFramesWritten > 0 && fileManager.fileExists(atPath: micURL.path)
+        }()
         let hasSystemAudio = {
             guard let sysURL else { return false }
             return sysFramesWritten > 0 && fileManager.fileExists(atPath: sysURL.path)
         }()
 
-        if hasMicAudio, let sysURL, hasSystemAudio {
+        if hasMicAudio, let micURL, let sysURL, hasSystemAudio {
             removeExistingFile(at: outputURL)
             if await mixTracksToM4A(micURL: micURL, sysURL: sysURL, outputURL: outputURL) {
                 return true
@@ -862,7 +863,7 @@ class SessionRecorder: NSObject, ObservableObject {
             print("SessionRecorder: Mixed export failed; falling back to single-track export")
         }
 
-        if hasMicAudio {
+        if hasMicAudio, let micURL {
             removeExistingFile(at: outputURL)
             if await convertSingleTrackToM4A(inputURL: micURL, outputURL: outputURL) {
                 return true
@@ -894,8 +895,8 @@ class SessionRecorder: NSObject, ObservableObject {
         return (attrs[.size] as? Int64) ?? 0
     }
 
-    private func writeFailureDiagnostics(micURL: URL, sysURL: URL?) {
-        let sessionDir = micURL.deletingLastPathComponent()
+    private func writeFailureDiagnostics(micURL: URL?, sysURL: URL?) {
+        guard let sessionDir = (sysURL ?? micURL ?? outputURL)?.deletingLastPathComponent() else { return }
         let diagnosticsURL = sessionDir.appendingPathComponent("recording_failure.txt")
 
         var lines = [
@@ -917,8 +918,9 @@ class SessionRecorder: NSObject, ObservableObject {
             "mixSystemGain=\(appliedMixSystemGain)",
             "micFramesWritten=\(micFramesWritten)",
             "sysFramesWritten=\(sysFramesWritten)",
-            "micExists=\(FileManager.default.fileExists(atPath: micURL.path))",
-            "micSize=\(fileSize(at: micURL))",
+            "sysMaxPeak=\(sysMaxPeak)",
+            "micExists=\(micURL.map { FileManager.default.fileExists(atPath: $0.path) } ?? false)",
+            "micSize=\(micURL.map { fileSize(at: $0) } ?? 0)",
         ]
 
         if let sysURL {
