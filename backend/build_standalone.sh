@@ -92,14 +92,8 @@ python3 -m PyInstaller \
     --hidden-import scipy.io \
     --hidden-import scipy.io.wavfile \
     --hidden-import numpy \
-    --hidden-import torch \
-    --hidden-import torchaudio \
     --hidden-import huggingface_hub \
-    --collect-all torch \
-    --collect-all torchaudio \
     --collect-all sounddevice \
-    --copy-metadata torch \
-    --copy-metadata torchaudio \
     --add-binary "bin/whisper-cli:bin" \
     server.py
 

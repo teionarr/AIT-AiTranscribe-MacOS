@@ -219,11 +219,11 @@ BUILD_DIR="$PROJECT_ROOT/build/xcode"
 # Clean and build
 echo "Cleaning previous build..."
 xcodebuild -project AiTranscribe.xcodeproj -scheme AiTranscribe -configuration Release \
-    -derivedDataPath "$BUILD_DIR" clean 2>/dev/null || true
+    -derivedDataPath "$BUILD_DIR" CODE_SIGNING_ALLOWED=NO clean 2>/dev/null || true
 
 echo "Building Release configuration..."
 xcodebuild -project AiTranscribe.xcodeproj -scheme AiTranscribe -configuration Release \
-    -derivedDataPath "$BUILD_DIR" build
+    -derivedDataPath "$BUILD_DIR" CODE_SIGNING_ALLOWED=NO build
 
 # Find the built app in our dedicated build directory
 APP_PATH=$(find "$BUILD_DIR" -name "AiTranscribe.app" -path "*/Release/*" -type d 2>/dev/null | head -1)
